@@ -17,12 +17,6 @@ pub fn draw_editor(ctx: &mut Context, state: &mut State) {
     }
 
     let size = ctx.size();
-    // TODO: The layout code should be able to just figure out the height on its own.
-    let height_reduction = match state.wants_search.kind {
-        StateSearchKind::Search => 4,
-        StateSearchKind::Replace => 5,
-        _ => 2,
-    };
 
     if let Some(doc) = state.documents.active() {
         ctx.textarea("textarea", doc.buffer.clone());
@@ -32,7 +26,20 @@ pub fn draw_editor(ctx: &mut Context, state: &mut State) {
         ctx.block_end();
     }
 
-    ctx.attr_intrinsic_size(Size { width: 0, height: size.height - height_reduction });
+    ctx.attr_intrinsic_size(Size {
+        width: 0,
+        height: editor_height(size.height, state.wants_search.kind),
+    });
+}
+
+fn editor_height(height: CoordType, search: StateSearchKind) -> CoordType {
+    // TODO: The layout code should be able to just figure out the height on its own.
+    let height_reduction = match search {
+        StateSearchKind::Search => 4,
+        StateSearchKind::Replace => 5,
+        _ => 2,
+    };
+    (height - height_reduction).max(0)
 }
 
 fn draw_search(ctx: &mut Context, state: &mut State) {
@@ -353,4 +360,25 @@ fn validate_goto_point(line: &str) -> Option<Point> {
         return None;
     }
     Some(Point { x: coords[0], y: coords[1] })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_height_handles_small_viewports_and_resize() {
+        for (search, reserved) in [
+            (StateSearchKind::Hidden, 2),
+            (StateSearchKind::Disabled, 2),
+            (StateSearchKind::Search, 4),
+            (StateSearchKind::Replace, 5),
+        ] {
+            for height in (0..=8).rev().chain(0..=8).chain([24, 80, COORD_TYPE_SAFE_MAX]) {
+                let actual = editor_height(height, search);
+                assert!(actual >= 0, "height {height}, reserved {reserved}: {actual}");
+                assert_eq!(actual, if height < reserved { 0 } else { height - reserved });
+            }
+        }
+    }
 }
