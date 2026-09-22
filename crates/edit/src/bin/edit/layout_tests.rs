@@ -89,7 +89,7 @@ fn grid_editor_preserves_focus_through_resize_search_and_menus() {
             frame(&mut tui, &mut state, Some(Input::Keyboard(kbmod::CTRL | vk::END)));
         }
         let mut expected = "line\n".repeat(lines);
-        for phase in ["resize", "search", "menu"] {
+        for phase in ["resize", "search", "menu", "dialog", "file-picker"] {
             if phase == "search" {
                 state.wants_search.kind = StateSearchKind::Search;
                 state.wants_search.focus = true;
@@ -109,6 +109,34 @@ fn grid_editor_preserves_focus_through_resize_search_and_menus() {
                     assert_eq!(outer(&layout, "statusbar").bottom, 24);
                 }
                 frame(&mut tui, &mut state, Some(Input::Keyboard(vk::ESCAPE)));
+            }
+            if phase == "dialog" {
+                // save_as_string below marks the document clean.
+                frame(&mut tui, &mut state, Some(Input::Text("!")));
+                expected.push('!');
+                state.wants_close = true;
+                frame(&mut tui, &mut state, None);
+                for key in [vk::TAB, kbmod::SHIFT | vk::TAB, vk::RIGHT, vk::RIGHT, vk::RETURN] {
+                    frame(&mut tui, &mut state, Some(Input::Keyboard(key)));
+                }
+                assert!(!state.wants_close && !state.wants_save);
+                assert!(state.documents.active().is_some());
+            }
+            if phase == "file-picker" {
+                state.wants_file_picker = StateFilePicker::SaveAsShown;
+                state.file_picker_pending_name = "layout.txt".into();
+                state.file_picker_entries = Some(Default::default());
+                frame(&mut tui, &mut state, None);
+                {
+                    let scratch = arena::scratch_arena(None);
+                    let layout = tui.debug_layout(&scratch);
+                    assert_eq!(outer(&layout, "dir").left, outer(&layout, "name").left);
+                }
+                frame(&mut tui, &mut state, Some(Input::Keyboard(kbmod::CTRL | vk::END)));
+                frame(&mut tui, &mut state, Some(Input::Text("x")));
+                assert_eq!(state.file_picker_pending_name, std::path::Path::new("layout.txtx"));
+                frame(&mut tui, &mut state, Some(Input::Keyboard(vk::ESCAPE)));
+                assert!(state.wants_file_picker == StateFilePicker::None);
             }
             frame(&mut tui, &mut state, Some(Input::Text(phase)));
             expected.push_str(phase);
