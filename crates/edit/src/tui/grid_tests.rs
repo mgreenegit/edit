@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use GridTrack::{Auto, Fixed, Fraction};
+use GridTrack::{Auto, Fixed, Fraction, Intrinsic};
 
 use super::*;
 
@@ -32,6 +32,12 @@ fn grid(
     ctx.attr_grid_template_columns(columns);
     ctx.attr_grid_template_rows(rows);
     draw(&mut ctx);
+}
+
+fn subgrid_begin(ctx: &mut Context<'_, '_>, name: &'static str) {
+    ctx.block_begin(name);
+    ctx.attr_display(Display::Grid);
+    ctx.attr_grid_column_subgrid();
 }
 
 #[test]
@@ -98,19 +104,22 @@ fn grid_allocator_rounds_and_handles_zero_and_extreme_tracks() {
         GridContent::tracks(&arena, &[Fixed(2), Auto, Fraction(1), Fraction(3), Fraction(0)]);
     tracks[1].intrinsic = 3;
     tracks[2].intrinsic = 999;
-    assert_eq!(GridContent::preferred_size(&tracks), 4001);
-    for available in 0..40 {
-        GridContent::allocate(&mut tracks, available);
-        let remaining = (available - 5).max(0);
-        let sizes: Vec<_> = tracks.iter().map(|t| t.end - t.start).collect();
-        assert_eq!(sizes, [2, 3, remaining / 4, remaining - remaining / 4, 0]);
+    for gap in [0, 1, 4] {
+        assert_eq!(GridContent::preferred_size(&tracks, gap), 4001 + 4 * gap);
+        for available in 0..40 {
+            GridContent::allocate(&mut tracks, available, gap);
+            let remaining = (available - 5 - 4 * gap).max(0);
+            let sizes: Vec<_> = tracks.iter().map(|t| t.end - t.start).collect();
+            assert_eq!(sizes, [2, 3, remaining / 4, remaining - remaining / 4, 0]);
+            assert!(tracks.windows(2).all(|pair| pair[1].start - pair[0].end == gap));
+        }
     }
     let extremes = [Fixed(CoordType::MIN), Fraction(u16::MAX), Fraction(u16::MAX)];
     let mut tracks = GridContent::tracks(&arena, &extremes);
-    GridContent::allocate(&mut tracks, CoordType::MAX);
+    GridContent::allocate(&mut tracks, CoordType::MAX, 0);
     assert_eq!(tracks[2].end, CoordType::MAX);
     tracks[1].intrinsic = CoordType::MAX;
-    assert_eq!(GridContent::preferred_size(&tracks), CoordType::MAX);
+    assert_eq!(GridContent::preferred_size(&tracks, 0), CoordType::MAX);
 }
 
 #[test]
@@ -165,6 +174,177 @@ fn grid_default_tracks_overrides_and_collapsed_descendants() {
     }
 }
 
+#[test]
+fn grid_shared_cells_preserve_minimum_tracks_and_bounded_placement() {
+    let mut tui = Tui::new().unwrap();
+    for (columns, natural_width) in [
+        (&[Intrinsic(3), Intrinsic(20)][..], 26),
+        (&[Intrinsic(1), Intrinsic(-1)][..], 10),
+        (&[][..], 10),
+    ] {
+        for (width, height) in [(30, 20), (12, 6), (5, 9), (2, 2), (1, 1), (0, 0), (30, 20)] {
+            tui.set_size(Size { width, height });
+            {
+                let mut ctx = tui.create_context(None);
+                ctx.block_begin("grid");
+                ctx.attr_display(Display::Grid);
+                ctx.attr_grid_template_columns(columns);
+                ctx.attr_grid_auto_columns(Intrinsic(0));
+                ctx.attr_grid_auto_rows(Intrinsic(0));
+                ctx.attr_grid_gap(Size { width: 1, height: 1 });
+                subgrid_begin(&mut ctx, "first");
+                ctx.attr_grid_align_items(GridAlignment::Start);
+                ctx.attr_grid_justify_items(GridAlignment::Stretch);
+                ctx.block_begin("a");
+                ctx.attr_display(Display::Grid);
+                ctx.attr_intrinsic_size(Size { width: 1, height: 1 });
+                ctx.attr_border();
+                pane(&mut ctx, "child", 8, 8);
+                ctx.block_end();
+                pane(&mut ctx, "b", 1, 1);
+                ctx.attr_position(Position::Right);
+                pane(&mut ctx, "float", 99, 99);
+                ctx.attr_float(FloatSpec::default());
+                ctx.block_end();
+                subgrid_begin(&mut ctx, "empty");
+                ctx.block_end();
+                subgrid_begin(&mut ctx, "padded");
+                ctx.attr_grid_align_items(GridAlignment::Start);
+                ctx.attr_border();
+                ctx.attr_padding(Rect::one(1));
+                pane(&mut ctx, "short", 3, 1);
+                pane(&mut ctx, "tall", 2, 3);
+                ctx.block_end();
+                subgrid_begin(&mut ctx, "last");
+                pane(&mut ctx, "c", 5, 1);
+                ctx.block_end();
+                ctx.block_end();
+            }
+            let grid = node(&tui, "grid").borrow();
+            assert_eq!(grid.intrinsic_size, Size { width: natural_width, height: 14 });
+            assert_eq!(tui.prev_tree.iterate_roots().count(), 2);
+            for row in Tree::iterate_siblings(grid.children.first) {
+                assert_eq!(row.borrow().outer.width(), grid.inner.width());
+            }
+            assert_eq!(rect(&tui, "a").right, width.min(5));
+            assert_eq!(rect(&tui, "b").left, width.min(6));
+            assert_eq!(rect(&tui, "b").right, width.min(natural_width));
+            assert_eq!(rect(&tui, "b").height(), height.min(1));
+            assert_eq!(rect(&tui, "c").top, height.min(13));
+            for name in ["a", "b", "c", "child", "short", "tall"] {
+                let n = node(&tui, name).borrow();
+                assert!(n.outer.left <= n.outer.right && n.outer.top <= n.outer.bottom);
+                assert!(n.inner.left <= n.inner.right && n.inner.top <= n.inner.bottom);
+                assert!(n.outer.right <= width && n.outer.bottom <= height);
+            }
+            let a = node(&tui, "a").borrow();
+            assert_eq!(node(&tui, "child").borrow().outer_clipped, a.inner_clipped);
+            let row = node(&tui, "padded").borrow();
+            assert_eq!(row.intrinsic_size, Size { width: natural_width - 4, height: 3 });
+            for name in ["short", "tall"] {
+                let cell = node(&tui, name).borrow();
+                assert!(cell.outer.left >= row.inner.left && cell.outer.right <= row.inner.right);
+                assert!(cell.outer.top >= row.inner.top && cell.outer.bottom <= row.inner.bottom);
+                assert_eq!(cell.outer_clipped, cell.outer.intersect(row.inner_clipped));
+            }
+            if width == 30 {
+                assert_eq!(rect(&tui, "short"), Rect { left: 2, top: 7, right: 5, bottom: 8 });
+                let expected = Rect { left: 6, top: 7, right: natural_width - 2, bottom: 10 };
+                assert_eq!(rect(&tui, "tall"), expected);
+                assert_eq!(rect(&tui, "tall").left, rect(&tui, "b").left);
+            }
+        }
+    }
+}
+
+#[test]
+fn grid_intrinsic_tracks_gaps_and_alignment_work_without_shared_rows() {
+    let mut tui = Tui::new().unwrap();
+    tui.set_size(Size { width: 30, height: 12 });
+    grid(&mut tui, &[Intrinsic(3), Intrinsic(0)], &[], |ctx| {
+        ctx.attr_grid_auto_rows(Intrinsic(0));
+        ctx.attr_grid_gap(Size { width: 2, height: 1 });
+        ctx.attr_grid_align_items(GridAlignment::Start);
+        pane(ctx, "short", 1, 1);
+        pane(ctx, "tall", 4, 3);
+        pane(ctx, "next", 2, 1);
+    });
+    assert_eq!(rect(&tui, "short"), Rect { left: 0, top: 0, right: 3, bottom: 1 });
+    assert_eq!(rect(&tui, "tall"), Rect { left: 5, top: 0, right: 9, bottom: 3 });
+    assert_eq!(rect(&tui, "next"), Rect { left: 0, top: 4, right: 3, bottom: 5 });
+
+    grid(&mut tui, &[Fixed(3), Fraction(1)], &[], |ctx| {
+        ctx.attr_grid_auto_rows(Intrinsic(0));
+        pane(ctx, "flat", 1, 1);
+        subgrid_begin(ctx, "row");
+        pane(ctx, "a", 1, 2);
+        pane(ctx, "b", 1, 1);
+        ctx.block_end();
+        pane(ctx, "after", 1, 1);
+    });
+    assert_eq!(rect(&tui, "flat").top, 0);
+    assert_eq!(rect(&tui, "a"), Rect { left: 0, top: 1, right: 3, bottom: 3 });
+    assert_eq!(rect(&tui, "b"), Rect { left: 3, top: 1, right: 30, bottom: 3 });
+    assert_eq!(rect(&tui, "after").top, 3);
+}
+
+fn focus_grid(tui: &mut Tui, display: Display, input: Option<Input<'_>>, consume: bool) {
+    let mut ctx = tui.create_context(input);
+    ctx.block_begin("container");
+    ctx.attr_display(display);
+    if matches!(display, Display::Grid) {
+        ctx.attr_grid_auto_columns(Intrinsic(0));
+        ctx.attr_grid_auto_rows(Intrinsic(0));
+    }
+    ctx.attr_focus_navigation(FocusNavigation::Vertical);
+    ctx.attr_focus_well();
+    ctx.focus_on_first_present();
+    for (index, names) in [["a", "b"], ["c", "d"]].into_iter().enumerate() {
+        ctx.next_block_id_mixin(index as u64);
+        ctx.block_begin("row");
+        ctx.attr_display(display);
+        if matches!(display, Display::Grid) {
+            ctx.attr_grid_column_subgrid();
+        }
+        ctx.attr_focus_navigation(FocusNavigation::Horizontal);
+        ctx.inherit_focus();
+        for name in names {
+            ctx.block_begin(name);
+            ctx.attr_intrinsic_size(Size { width: 2, height: 1 });
+            ctx.inherit_focus();
+            if consume && ctx.is_focused() && ctx.keyboard_input().is_some() {
+                ctx.set_input_consumed();
+            }
+            ctx.block_end();
+        }
+        ctx.block_end();
+    }
+    ctx.block_end();
+}
+
+#[test]
+fn grid_navigation_preserves_horizontal_vertical_tab_and_input_priority() {
+    for display in [Display::Grid, Display::Block] {
+        let mut tui = Tui::new().unwrap();
+        tui.set_size(Size { width: 20, height: 10 });
+        focus_grid(&mut tui, display, None, false);
+        for (key, name, consume) in [
+            (vk::RIGHT, "a", true),
+            (vk::RIGHT, "b", false),
+            (vk::RIGHT, "a", false),
+            (vk::LEFT, "b", false),
+            (vk::DOWN, "c", false),
+            (vk::UP, "a", false),
+            (vk::TAB, "b", false),
+            (SHIFT_TAB, "a", false),
+        ] {
+            focus_grid(&mut tui, display, Some(Input::Keyboard(key)), consume);
+            focus_grid(&mut tui, display, None, false);
+            assert_eq!(tui.focused_node_path.last(), Some(&node(&tui, name).borrow().id));
+        }
+    }
+}
+
 fn menu(tui: &mut Tui, input: Option<Input<'_>>) -> bool {
     let mut ctx = tui.create_context(input);
     ctx.attr_display(Display::Grid);
@@ -192,7 +372,7 @@ fn mouse(state: InputMouseState, position: Point) -> Input<'static> {
 }
 
 #[test]
-fn grid_ancestor_preserves_legacy_menu_highlight_and_row_hitbox() {
+fn grid_ancestor_preserves_menu_highlight_and_row_hitbox() {
     let mut tui = Tui::new().unwrap();
     for height in [24, 3, 24] {
         tui.set_size(Size { width: 80, height });
