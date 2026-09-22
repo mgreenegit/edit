@@ -1969,80 +1969,6 @@ impl<'a> Context<'a, '_> {
         }
     }
 
-    /// Begins a table block. Call [`Context::table_end()`].
-    /// Uses Grid sizing and placement while retaining interactive row groups.
-    pub fn table_begin(&mut self, classname: &'static str) {
-        self.block_begin(classname);
-        self.attr_display(Display::Grid);
-        self.attr_grid_auto_columns(GridTrack::Intrinsic(0));
-        self.attr_grid_auto_rows(GridTrack::Intrinsic(0));
-        self.attr_focus_navigation(FocusNavigation::Vertical);
-    }
-
-    /// Assigns minimum column widths. Nonpositive values use intrinsic widths.
-    /// Table tracks do not stretch into unused space.
-    pub fn table_set_columns(&mut self, columns: &[CoordType]) {
-        let mut last_node = self.tree.last_node.borrow_mut();
-        if let NodeContent::Grid(spec) = &mut last_node.content {
-            spec.columns.clear();
-            for &width in columns {
-                let template = GridTrack::Intrinsic(width.max(0));
-                spec.columns.push(self.arena(), GridTrackSize { template, ..Default::default() });
-            }
-        } else {
-            debug_assert!(false);
-        }
-    }
-
-    /// Assigns the gap between cells in the current table.
-    pub fn table_set_cell_gap(&mut self, cell_gap: Size) {
-        self.attr_grid_gap(cell_gap);
-    }
-
-    /// Starts the next row in the current table.
-    pub fn table_next_row(&mut self) {
-        {
-            let current_node = self.tree.current_node.borrow();
-
-            // If this is the first call to table_next_row() inside a new table, the
-            // current_node will refer to the table. Otherwise, it'll refer to the current row.
-            if current_node.is_column_subgrid() {
-                let Some(parent) = current_node.parent else {
-                    return;
-                };
-
-                let parent = parent.borrow();
-                // Neither the current nor its parent nodes are a table?
-                // You definitely called this outside of a table block.
-                debug_assert!(matches!(parent.content, NodeContent::Grid(_)));
-
-                self.block_end();
-
-                self.next_block_id_mixin(parent.child_count as u64);
-            }
-        }
-
-        self.block_begin("row");
-        self.attr_display(Display::Grid);
-        self.attr_grid_column_subgrid();
-        self.attr_grid_align_items(GridAlignment::Start);
-        self.attr_grid_justify_items(GridAlignment::Stretch);
-        self.attr_focus_navigation(FocusNavigation::Horizontal);
-    }
-
-    /// Ends the current table block.
-    pub fn table_end(&mut self) {
-        let current_node = self.tree.current_node.borrow();
-
-        // If this is the first call to table_next_row() inside a new table, the
-        // current_node will refer to the table. Otherwise, it'll refer to the current row.
-        if current_node.is_column_subgrid() {
-            self.block_end();
-        }
-
-        self.block_end(); // table
-    }
-
     fn move_focus(&mut self, prev_key: InputKey, next_key: InputKey) {
         // Filter down to containers that are focused.
         if !self.contains_focus() {
@@ -3330,9 +3256,24 @@ impl<'a> Context<'a, '_> {
 
     /// Creates a menubar, to be shown at the top of the screen.
     pub fn menubar_begin(&mut self) {
-        self.table_begin("menubar");
+        self.block_begin("menubar");
+        self.attr_display(Display::Grid);
+        self.attr_grid_auto_columns(GridTrack::Intrinsic(0));
+        self.attr_grid_auto_rows(GridTrack::Intrinsic(0));
+        self.attr_focus_navigation(FocusNavigation::Vertical);
         self.attr_focus_well();
-        self.table_next_row();
+        self.menubar_row_begin();
+    }
+
+    fn menubar_row_begin(&mut self) {
+        let mixin = self.tree.current_node.borrow().child_count as u64;
+        self.next_block_id_mixin(mixin);
+        self.block_begin("row");
+        self.attr_display(Display::Grid);
+        self.attr_grid_column_subgrid();
+        self.attr_grid_align_items(GridAlignment::Start);
+        self.attr_grid_justify_items(GridAlignment::Stretch);
+        self.attr_focus_navigation(FocusNavigation::Horizontal);
     }
 
     /// Appends a menu to the current menubar.
@@ -3381,7 +3322,11 @@ impl<'a> Context<'a, '_> {
             }
 
             self.next_block_id_mixin(mixin);
-            self.table_begin("flyout");
+            self.block_begin("flyout");
+            self.attr_display(Display::Grid);
+            self.attr_grid_auto_columns(GridTrack::Intrinsic(0));
+            self.attr_grid_auto_rows(GridTrack::Intrinsic(0));
+            self.attr_focus_navigation(FocusNavigation::Vertical);
             self.attr_float(FloatSpec {
                 anchor: Anchor::Last,
                 gravity_x: 0.0,
@@ -3421,7 +3366,7 @@ impl<'a> Context<'a, '_> {
         shortcut: InputKey,
         checked: bool,
     ) -> bool {
-        self.table_next_row();
+        self.menubar_row_begin();
         self.attr_focusable();
 
         // First menu item? Steal focus.
@@ -3450,12 +3395,13 @@ impl<'a> Context<'a, '_> {
             Tui::clean_node_path(&mut self.tui.focused_node_path);
         }
 
+        self.block_end();
         clicked
     }
 
     /// Ends the current menu.
     pub fn menubar_menu_end(&mut self) {
-        self.table_end();
+        self.block_end();
 
         if !self.input_consumed
             && let Some(key) = self.input_keyboard
@@ -3483,7 +3429,8 @@ impl<'a> Context<'a, '_> {
 
     /// Ends the current menubar.
     pub fn menubar_end(&mut self) {
-        self.table_end();
+        self.block_end(); // row
+        self.block_end(); // menubar
 
         if !self.contains_focus() {
             self.tui.menubar_toggle_id = 0;
